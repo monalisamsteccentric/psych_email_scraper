@@ -5,5 +5,7 @@
         "radical thoughts",
         "storytelling blog"
     ],
-    "max_pages": 3
+    "max_results": 20,
+    "sheet_name": "PsychThoughtLeads"
 }
+
