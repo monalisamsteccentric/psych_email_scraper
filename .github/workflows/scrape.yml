@@ -9,21 +9,18 @@ jobs:
   scrape:
     runs-on: ubuntu-latest
     steps:
-      # Step 1: Checkout the repo
       - uses: actions/checkout@v3
 
-      # Step 2: Setup Python in the cloud VM
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
           python-version: '3.11'
 
-      # Step 3: Install required Python packages in the cloud VM
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      # Step 4: Run the scraper, passing the Google Sheets credentials securely
       - name: Run scraper
         env:
           GOOGLE_CREDS_JSON: ${{ secrets.GOOGLE_CREDS_JSON }}
+          SERPAPI_KEY: ${{ secrets.SERPAPI_KEY }}
         run: python scraper.py
