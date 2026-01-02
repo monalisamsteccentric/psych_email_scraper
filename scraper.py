@@ -1,10 +1,9 @@
 import os
+import json
 import requests
-from bs4 import BeautifulSoup
+import pandas as pd
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
-import pandas as pd
-import json
 import re
 import time
 
@@ -15,13 +14,12 @@ with open("config.json") as f:
     config = json.load(f)
 
 KEYWORDS = config["keywords"]
-MAX_PAGES = config.get("max_pages", 3)
-SHEET_NAME = config.get("sheet_name", "PsychThoughtLeads")  # Default sheet name
+MAX_RESULTS_PER_KEYWORD = config.get("max_results", 20)
+SHEET_NAME = config.get("sheet_name", "PsychThoughtLeads")
 
 # --------------------------
-# Google Sheets setup via GitHub Secret
+# Google Sheets setup
 # --------------------------
-# The secret GOOGLE_CREDS_JSON should contain the full JSON of your service account
 creds_dict = json.loads(os.environ["GOOGLE_CREDS_JSON"])
 scope = ["https://spreadsheets.google.com/feeds","https://www.googleapis.com/auth/drive"]
 creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
@@ -36,27 +34,37 @@ except gspread.SpreadsheetNotFound:
     print(f"Created new Google Sheet: {SHEET_NAME}")
 
 # --------------------------
-# Google search function
+# SerpAPI setup
 # --------------------------
-def google_search_urls(query, max_pages=3):
+SERPAPI_KEY = os.environ["SERPAPI_KEY"]
+SEARCH_ENGINE = "google"  # SerpAPI engine
+
+def serpapi_search_urls(query, num_results=20):
+    """
+    Use SerpAPI to get URLs for a search query
+    """
     urls = []
-    for i in range(max_pages):
-        start = i * 10
-        search_url = f"https://www.google.com/search?q={query}&start={start}"
-        headers = {"User-Agent": "Mozilla/5.0"}
+    start = 0
+    while len(urls) < num_results:
+        params = {
+            "engine": SEARCH_ENGINE,
+            "q": query,
+            "api_key": SERPAPI_KEY,
+            "start": start
+        }
         try:
-            r = requests.get(search_url, headers=headers, timeout=5)
-            soup = BeautifulSoup(r.text, "html.parser")
-            for link in soup.find_all("a"):
-                href = link.get("href")
-                if href and href.startswith("/url?q="):
-                    url = href.split("/url?q=")[1].split("&")[0]
-                    urls.append(url)
+            response = requests.get("https://serpapi.com/search", params=params, timeout=10)
+            data = response.json()
+            for result in data.get("organic_results", []):
+                link = result.get("link")
+                if link:
+                    urls.append(link)
+            start += 10
             time.sleep(1)
         except Exception as e:
-            print(f"Error fetching search results for {query}: {e}")
-            continue
-    return list(set(urls))
+            print(f"Error in SerpAPI request: {e}")
+            break
+    return urls[:num_results]
 
 # --------------------------
 # Email extraction
@@ -66,8 +74,7 @@ def extract_emails(url):
     try:
         headers = {"User-Agent": "Mozilla/5.0"}
         r = requests.get(url, headers=headers, timeout=5)
-        soup = BeautifulSoup(r.text, "html.parser")
-        text = soup.get_text()
+        text = r.text
         found = re.findall(r"[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+", text)
         for email in found:
             emails.add(email)
@@ -76,13 +83,13 @@ def extract_emails(url):
     return list(emails)
 
 # --------------------------
-# Main scraping logic
+# Main function
 # --------------------------
 def main():
     results = []
     for keyword in KEYWORDS:
         print(f"Searching for keyword: {keyword}")
-        urls = google_search_urls(keyword, MAX_PAGES)
+        urls = serpapi_search_urls(keyword, MAX_RESULTS_PER_KEYWORD)
         print(f"Found {len(urls)} URLs")
         for url in urls:
             emails = extract_emails(url)
