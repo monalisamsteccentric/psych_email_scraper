@@ -1,111 +1,136 @@
 import os
-import json
 import requests
-import pandas as pd
+import re
+import json
+import time
+from datetime import datetime
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
-import re
-import time
+from bs4 import BeautifulSoup
+from urllib.parse import urlparse
 
-# --------------------------
-# Load config
-# --------------------------
-with open("config.json") as f:
-    config = json.load(f)
+# ---------------- CONFIG ---------------- #
+SERP_API_KEY = os.environ["SERPAPI_KEY"]
 
-KEYWORDS = config["keywords"]
-MAX_RESULTS_PER_KEYWORD = config.get("max_results", 20)
-SHEET_NAME = config.get("sheet_name", "PsychThoughtLeads")
+KEYWORDS = [
+    "personal psychology blog",
+    "independent psychology writer",
+    "psychology essays personal site",
+    "human behavior personal blog",
+    "radical psychology thinker"
+]
 
-# --------------------------
-# Google Sheets setup
-# --------------------------
-creds_dict = json.loads(os.environ["GOOGLE_CREDS_JSON"])
-scope = ["https://spreadsheets.google.com/feeds","https://www.googleapis.com/auth/drive"]
-creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
+MAX_RESULTS_PER_KEYWORD = 10
+
+BLOCKED_DOMAINS = [
+    "medium.com", "substack.com", "wordpress.com", "wixsite.com",
+    "blogspot.com", "tumblr.com", "github.io"
+]
+
+FAKE_DOMAINS = [
+    "example.com", "domain.com", "sentry.io", "feedly.com", "amazon.com"
+]
+
+ASSET_EXTENSIONS = (
+    ".png", ".jpg", ".jpeg", ".svg", ".webp",
+    ".css", ".js", ".woff", ".ico"
+)
+
+EMAIL_REGEX = r"[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+"
+
+# ---------------- GSHEET SETUP ---------------- #
+creds_json = json.loads(os.environ["GOOGLE_CREDS_JSON"])
+scope = [
+    "https://spreadsheets.google.com/feeds",
+    "https://www.googleapis.com/auth/drive"
+]
+
+creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_json, scope)
 client = gspread.authorize(creds)
 
-# Try to open existing sheet, else create
-try:
-    sheet = client.open(SHEET_NAME).sheet1
-except gspread.SpreadsheetNotFound:
-    spreadsheet = client.create(SHEET_NAME)
-    sheet = spreadsheet.sheet1
-    print(f"Created new Google Sheet: {SHEET_NAME}")
+sheet = client.open("PsychThoughtLeads")
+leads_ws = sheet.worksheet("Leads")
+visited_ws = sheet.worksheet("Visited")
 
-# --------------------------
-# SerpAPI setup
-# --------------------------
-SERPAPI_KEY = os.environ["SERPAPI_KEY"]
-SEARCH_ENGINE = "google"  # SerpAPI engine
+existing_emails = set(filter(None, leads_ws.col_values(1)))
+visited_urls = set(filter(None, visited_ws.col_values(1)))
 
-def serpapi_search_urls(query, num_results=20):
-    """
-    Use SerpAPI to get URLs for a search query
-    """
-    urls = []
-    start = 0
-    while len(urls) < num_results:
-        params = {
-            "engine": SEARCH_ENGINE,
-            "q": query,
-            "api_key": SERPAPI_KEY,
-            "start": start
-        }
-        try:
-            response = requests.get("https://serpapi.com/search", params=params, timeout=10)
-            data = response.json()
-            for result in data.get("organic_results", []):
-                link = result.get("link")
-                if link:
-                    urls.append(link)
-            start += 10
-            time.sleep(1)
-        except Exception as e:
-            print(f"Error in SerpAPI request: {e}")
-            break
-    return urls[:num_results]
+# ---------------- HELPERS ---------------- #
+def is_personal_blog(url):
+    domain = urlparse(url).netloc.lower()
+    return not any(bad in domain for bad in BLOCKED_DOMAINS)
 
-# --------------------------
-# Email extraction
-# --------------------------
+def valid_email(email):
+    if email.endswith(ASSET_EXTENSIONS):
+        return False
+    domain = email.split("@")[-1].lower()
+    if domain in FAKE_DOMAINS:
+        return False
+    return True
+
 def extract_emails(url):
     emails = set()
     try:
-        headers = {"User-Agent": "Mozilla/5.0"}
-        r = requests.get(url, headers=headers, timeout=5)
-        text = r.text
-        found = re.findall(r"[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+", text)
-        for email in found:
-            emails.add(email)
-    except Exception as e:
-        print(f"Error extracting emails from {url}: {e}")
-    return list(emails)
+        r = requests.get(url, timeout=6, headers={"User-Agent": "Mozilla/5.0"})
+        soup = BeautifulSoup(r.text, "html.parser")
 
-# --------------------------
-# Main function
-# --------------------------
+        for tag in soup.find_all(text=True):
+            if tag.parent.name in ["p", "span", "a", "div"]:
+                found = re.findall(EMAIL_REGEX, tag)
+                for e in found:
+                    if valid_email(e):
+                        emails.add(e.lower())
+    except:
+        pass
+    return emails
+
+def serp_search(query):
+    params = {
+        "engine": "google",
+        "q": query,
+        "api_key": SERP_API_KEY,
+        "num": MAX_RESULTS_PER_KEYWORD
+    }
+    r = requests.get("https://serpapi.com/search", params=params)
+    data = r.json()
+    return [res["link"] for res in data.get("organic_results", [])]
+
+# ---------------- MAIN ---------------- #
 def main():
-    results = []
-    for keyword in KEYWORDS:
-        print(f"Searching for keyword: {keyword}")
-        urls = serpapi_search_urls(keyword, MAX_RESULTS_PER_KEYWORD)
-        print(f"Found {len(urls)} URLs")
-        for url in urls:
-            emails = extract_emails(url)
-            if emails:
-                for e in emails:
-                    results.append({"url": url, "email": e, "keyword": keyword})
+    new_rows = []
+    visited_new = []
 
-    if results:
-        df = pd.DataFrame(results)
-        try:
-            sheet.append_rows(df.values.tolist())
-            print(f"Added {len(results)} emails to Google Sheet '{SHEET_NAME}'.")
-        except Exception as e:
-            print(f"Error writing to Google Sheet: {e}")
-    else:
-        print("No emails found.")
+    for keyword in KEYWORDS:
+        urls = serp_search(keyword)
+
+        for url in urls:
+            if url in visited_urls:
+                continue
+            if not is_personal_blog(url):
+                continue
+
+            emails = extract_emails(url)
+
+            for email in emails:
+                if email not in existing_emails:
+                    new_rows.append([
+                        email,
+                        url,
+                        keyword,
+                        datetime.utcnow().isoformat()
+                    ])
+                    existing_emails.add(email)
+
+            visited_new.append([url])
+            visited_urls.add(url)
+            time.sleep(1)
+
+    if new_rows:
+        leads_ws.append_rows(new_rows)
+    if visited_new:
+        visited_ws.append_rows(visited_new)
+
+    print(f"Added {len(new_rows)} new human emails.")
 
 if __name__ == "__main__":
     main()
